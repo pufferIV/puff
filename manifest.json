@@ -1,0 +1,22 @@
+{
+  "name": "RusseGram RussianAI",
+  "short_name": "RusseGram",
+  "description": "Application d'apprentissage du russe",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f0f4f9",
+  "theme_color": "#4285f4",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
