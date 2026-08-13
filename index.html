@@ -1800,6 +1800,1209 @@
     //
     // ⚠️ Remplace l'URL ci-dessous par le domaine Netlify réel de ton app.
     // ============================================================
+    const EDGE_TTS_PROXY_URL = "https://russegram.netlify.app/netlify/functions/edge-tts";
+
+    async function synthesizeWithEdgeTTS(text, voiceName, ratePercent, pitchHz) {
+        const response = await fetch(EDGE_TTS_PROXY_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text: text,
+                voice: voiceName,
+                rate: ratePercent,
+                pitch: pitchHz
+            })
+        });
+
+        if (!response.ok) {
+            const details = await response.text().catch(() => "");
+            throw new Error(`HTTP ${response.status} - ${details}`);
+        }
+
+        return await response.blob();
+    }
+
+    // Fonction de synthèse vocale adaptative (voix naturelles via Edge-TTS, gratuit)
+    // On garde une instance audio unique pour pouvoir couper la lecture en cours si besoin
+    let currentTtsAudio = null;
+
+    async function speakRussianText(text) {
+        if (!text) return;
+
+        let statusEl = document.getElementById('voice-status');
+        let speed = voiceSettings.speed || 1.0;
+        // Voix Edge-TTS natives russes
+        let voiceName = voiceSettings.gender === 'male' ? 'ru-RU-DmitryNeural' : 'ru-RU-SvetlanaNeural';
+        // Conversion de la vitesse (1.0 = normal) en pourcentage attendu par le SSML
+        let ratePercent = Math.round((speed - 1) * 100);
+
+        // Coupe toute lecture audio précédente encore en cours
+        if (currentTtsAudio) {
+            currentTtsAudio.pause();
+            currentTtsAudio = null;
+        }
+
+        try {
+            if (statusEl) statusEl.innerText = "Génération de la voix...";
+
+            const audioBlob = await synthesizeWithEdgeTTS(text, voiceName, ratePercent, 0);
+            const audioUrl = URL.createObjectURL(audioBlob);
+            currentTtsAudio = new Audio(audioUrl);
+
+            currentTtsAudio.onended = () => {
+                URL.revokeObjectURL(audioUrl);
+                if (statusEl) statusEl.innerText = "Maintiens le bouton enfoncé pour parler";
+            };
+
+            if (statusEl) statusEl.innerText = "🔊 Lecture en cours...";
+            await currentTtsAudio.play();
+
+        } catch (e) {
+            console.error("Erreur TTS Edge-TTS :", e);
+            if (statusEl) statusEl.innerText = "Erreur TTS : " + (e && e.message ? e.message : e);
+
+            // FALLBACK : si pas d'internet ou erreur du protocole non-officiel, on retombe sur la voix système
+            try {
+                if ('speechSynthesis' in window) {
+                    window.speechSynthesis.cancel();
+                    let utterance = new SpeechSynthesisUtterance(text);
+                    utterance.lang = 'ru-RU';
+                    utterance.rate = speed;
+                    utterance.pitch = voiceSettings.gender === 'male' ? 0.8 : 1.2;
+
+                    let voices = window.speechSynthesis.getVoices();
+                    let russianVoices = voices.filter(v => v.lang && v.lang.toLowerCase().includes('ru'));
+                    if (russianVoices.length > 0) {
+                        utterance.voice = russianVoices[0];
+                    }
+                    window.speechSynthesis.speak(utterance);
+                }
+            } catch (fallbackError) {
+                console.error("Erreur TTS fallback :", fallbackError);
+            }
+        }
+    }
+
+    function switchTab(t) {
+        let currentActiveKey = tabsOrder[currentTabIndex];
+        if (currentActiveKey === 'ai' && t !== 'ai') {
+            resetChatBox();
+        }
+
+        if (currentActiveKey === 'russian-ai-voice' && t !== 'russian-ai-voice') {
+            voiceConversationHistory = [
+                { role: "system", content: "Tu es un agent conversationnel IA amical. Tu parles UNIQUEMENT en russe simple et lent (niveau débutant/intermédiaire), avec des phrases courtes et faciles à comprendre. À la fin de chaque réponse, pose une question simple pour poursuivre la discussion." }
+            ];
+            let voiceContainer = document.getElementById('voice-display-container');
+            if (voiceContainer) {
+                voiceContainer.innerHTML = `<span class="read-word" style="color: var(--text-sub); font-weight: normal; font-size: 1.1rem;">Привет! Давай поговорим по-русски.</span>`;
+            }
+            let statusEl = document.getElementById('voice-status');
+            if (statusEl) {
+                statusEl.innerText = "Maintiens le bouton enfoncé pour parler";
+            }
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+            }
+        }
+
+        let containerEl = document.getElementById('swipe-container');
+
+        if (t === 'ai' || t === 'russian-ai-voice' || currentActiveKey === 'ai' || currentActiveKey === 'russian-ai-voice') {
+            containerEl.style.transition = 'none';
+            containerEl.style.opacity = '0';
+
+            setTimeout(() => {
+                currentTabIndex = tabsOrder.indexOf(t);
+                containerEl.style.transform = `translateX(-${currentTabIndex * 100}vw)`;
+
+                containerEl.style.transition = 'opacity 0.3s ease-in-out';
+                containerEl.style.opacity = '1';
+
+                setTimeout(() => {
+                    containerEl.style.transition = 'transform 0.35s cubic-bezier(0.25, 1, 0.5, 1)';
+                }, 300);
+            }, 50);
+        } else {
+            containerEl.style.transition = 'transform 0.35s cubic-bezier(0.25, 1, 0.5, 1)';
+            currentTabIndex = tabsOrder.indexOf(t);
+            containerEl.style.transform = `translateX(-${currentTabIndex * 100}vw)`;
+        }
+
+        document.querySelectorAll('.nav-btn').forEach(e => e.classList.remove('active'));
+        let activeBtn = document.getElementById('btn-'+t);
+        if(activeBtn) activeBtn.classList.add('active');
+
+        if(t === 'progress') renderProgressView();
+    }
+
+    function switchToAiTab() {
+        switchTab('ai');
+    }
+
+    var tabsOrderWithoutAi = ['grammar', 'flashcards', 'quiz', 'writing', 'progress'];
+    var touchStartX = 0;
+    var touchEndX = 0;
+
+    document.getElementById('main-body').addEventListener('touchstart', function(event) {
+        touchStartX = event.changedTouches[0].screenX;
+    }, false);
+
+    document.getElementById('main-body').addEventListener('touchend', function(event) {
+        touchEndX = event.changedTouches[0].screenX;
+        handleSwipeGesture();
+    }, false);
+
+    function handleSwipeGesture() {
+        var threshold = 60;
+        let currentKey = tabsOrder[currentTabIndex];
+
+        if (currentKey === 'ai' || currentKey === 'russian-ai-voice') {
+            return;
+        }
+
+        let currentIndexInSub = tabsOrderWithoutAi.indexOf(currentKey);
+
+        if (touchEndX < touchStartX - threshold) {
+            if (currentIndexInSub < tabsOrderWithoutAi.length - 1) {
+                currentIndexInSub++;
+                switchTab(tabsOrderWithoutAi[currentIndexInSub]);
+            }
+        }
+        if (touchEndX > touchStartX + threshold) {
+            if (currentIndexInSub > 0) {
+                currentIndexInSub--;
+                switchTab(tabsOrderWithoutAi[currentIndexInSub]);
+            }
+        }
+    }
+
+    // Chargement séquentiel sécurisé pour éviter la saturation de l'API
+    window.onload = async () => {
+        renderGrammarInfo();
+        try { await generateNextFlashcard(); } catch(e){}
+        try { await generateNextQuiz(); } catch(e){}
+        try { await loadNextWritingPrompt(); } catch(e){}
+    };
+</script>
+</body>
+</html> времени).<br>• Mots irréguliers : мать (mère) devient матерью ou à l'instrumental, mais au datif c'est à la mère : матери; дочь (fille) devient дочери.<br>• Piège fréquent : L'expression de l'âge utilise le datif pour la personne (ex: Мне 20 лет / J'ai 20 ans, littéralement « À moi [il y a] 20 ans »).",
+            examples: ["• Я звоню своему другу. (J'appelle mon ami.) — Indique le destinataire de l'action", "• Мне очень нравится эта музыка. (Cette musique me plaît beaucoup.) — Utilisé avec le verbe нравиться"]
+        },
+        acc: {
+            title: "4. Accusatif (Винительный)",
+            question: "Кого? Что? / Куда? (Qui ? Quoi ? / Où ?)",
+            role: "Utilisé pour le Complément d'Objet Direct (COD) des inanimés et pour exprimer la direction d'un déplacement (mouvement vers un lieu).",
+            prepositions: "в (dans, vers - avec mouvement), на (sur - avec mouvement), через (à travers / par-dessus).",
+            endings: [{genre:"Masc. Inan.",sing:"= Nominatif",plur:"= Nominatif"},{genre:"Masc. Anim.",sing:"= Génitif",plur:"= Génitif"},{genre:"Féminin",sing:"-у / -ю",plur:"= Nominatif (si inanimé) ou = Génitif (si animé)"},{genre:"Neutre",sing:"= Nominatif",plur:"= Nominatif"}],
+            exceptions: "Exceptions et pièges notables :<br>• Piège de l'animé : Les noms masculins et féminins animés (personnes, animaux) à l'accusatif empruntent toujours la forme du génitif (ex: я вижу стол / je vois une table [inanimé = nominatif], mais я вижу друга / je vois un ami [animé = génitif]).<br>• Les féminins en -ь restent inchangés à l'accusatif singulier (ex: вижу ночь / je vois la nuit).",
+            examples: ["• Я вижу новую машину. (Je vois une nouvelle voiture.) — COD inanimé, identique au nominatif", "• Завтра я иду в парк. (Demain, je vais au parc.) — Exprime un mouvement de direction (Où ?)"]
+        },
+        ins: {
+            title: "5. Instrumental (Творительный)",
+            question: "Кем? Чем? (Par qui ? Avec quoi ?)",
+            role: "Indique le moyen ou l'instrument avec lequel on réalise une action, l'accompagnement, ou s'utilise pour exprimer une profession/état (être, devenir).",
+            prepositions: "с (avec, en compagnie de), над (au-dessus de), под (sous), перед (devant), за (derrière / pour).",
+            endings: [{genre:"Masculin",sing:"-ом / -ем",plur:"-ами / -ями"},{genre:"Féminin",sing:"-ой / -ей / -ью",plur:"-ами / -ями"},{genre:"Neutre",sing:"-ом / -ем",plur:"-ами / -ями"}],
+            exceptions: "Exceptions et pièges notables :<br>• Règle orthographique des chuintantes : После les consonnes ж, ш, ч, щ, ц, la terminaison prend -ом ou -ой si elle est accentuée, et -ем ou -ей si elle ne l'est pas.<br>• Certains féminins en -ь prennent la terminaison spécifique -ью (ex: тень → тенью / ombre → par l'ombre, ночь → ночью / la nuit).<br>• Piège de traduction : Ne pas confondre 'avec' d'accompagnement (préposition с + instrumental) et 'avec' d'instrument/moyen (instrumental seul, sans préposition).",
+            examples: ["• Я пишу важное письмо ручкой. (J'écris une lettre importante с un stylo.) — Instrument ou moyen de l'action", "• Я пью вкусный чай с лимоном. (Je bois du thé délicieux сvec du citron.) — Accompagnement / association"]
+        },
+        pre: {
+            title: "6. Prépositionnel (Предложный)",
+            question: "О ком? О чём? / Где? (À propos de qui ? De quoi ? / Où ?)",
+            role: "S'emploie EXCLUSIVEMENT avec une préposition pour désigner un lieu fixe (où l'on se trouve sans mouvement) ou le sujet/thème d'une conversation ou d'une pensée.",
+            prepositions: "в (dans - position fixe), на (sur - position fixe), о / об (à propos de).",
+            endings: [{genre:"Masculin",sing:"-е",plur:"-ах / -ях"},{genre:"Féminin",sing:"-е / -и",plur:"-ах / -ях"},{genre:"Neutre",sing:"-е",plur:"-ах / -ях"}],
+            exceptions: "Exceptions et pièges notables :<br>• Locatif en -у / -ю : Certains noms masculins monosyllabiques désignant un lieu prennent un -у accentué после les prépositions в ou на (ex: лес → в лесу / forêt → dans la forêt; мост → на мосту / pont → sur le pont).<br>• Mots en -ия, -ий, -ие : Ils se terminent par -и au prépositionnel singulier au lieu de -е (ex: Россия → в России / Russie → en Russie; здание → о здании / bâtiment → à propos du bâtiment).",
+            examples: ["• Мы живем в красивом Париже. (Nous habitons dans le beau Paris.) — Lieu fixe, immobilité", "• Мы долго говорим о погоде. (Nous parlons longtemps de la météo.) — Sujet de conversation avec о"]
+        }
+    };
+
+    var currentSelectedKey = 'nom';
+
+    function toggleCustomDropdown(e) {
+        e.stopPropagation();
+        document.getElementById('grammarDropdown').classList.toggle('active');
+        let g = document.getElementById('genderDropdown'); if(g) g.classList.remove('active');
+        let l = document.getElementById('levelDropdown'); if(l) l.classList.remove('active');
+    }
+
+    function toggleGenderDropdown(e) {
+        e.stopPropagation();
+        document.getElementById('genderDropdown').classList.toggle('active');
+        let d = document.getElementById('grammarDropdown'); if(d) d.classList.remove('active');
+        let l = document.getElementById('levelDropdown'); if(l) l.classList.remove('active');
+    }
+
+    function selectVoiceGender(val, label, element) {
+        voiceSettings.gender = val;
+        document.getElementById('currentGenderLabel').innerText = label;
+        document.querySelectorAll('#genderOptions .custom-dropdown-item').forEach(item => item.classList.remove('selected'));
+        if(element) element.classList.add('selected');
+        document.getElementById('genderDropdown').classList.remove('active');
+    }
+
+    function toggleLevelDropdown(e) {
+        e.stopPropagation();
+        document.getElementById('levelDropdown').classList.toggle('active');
+        let d = document.getElementById('grammarDropdown'); if(d) d.classList.remove('active');
+        let g = document.getElementById('genderDropdown'); if(g) g.classList.remove('active');
+    }
+
+    function selectVoiceLevel(val, label, element) {
+        voiceSettings.level = val;
+        document.getElementById('currentLevelLabel').innerText = label;
+        document.querySelectorAll('#levelOptions .custom-dropdown-item').forEach(item => item.classList.remove('selected'));
+        if(element) element.classList.add('selected');
+        document.getElementById('levelDropdown').classList.remove('active');
+    }
+
+    window.addEventListener('click', () => {
+        let dd = document.getElementById('grammarDropdown');
+        if(dd) dd.classList.remove('active');
+        let gDd = document.getElementById('genderDropdown');
+        if(gDd) gDd.classList.remove('active');
+        let lDd = document.getElementById('levelDropdown');
+        if(lDd) lDd.classList.remove('active');
+    });
+
+    function selectGrammarCase(key, labelText, element) {
+        currentSelectedKey = key;
+        document.getElementById('currentCaseLabel').innerText = labelText;
+
+        document.querySelectorAll('#grammarOptions .custom-dropdown-item').forEach(item => item.classList.remove('selected'));
+        if(element) element.classList.add('selected');
+
+        document.getElementById('grammarDropdown').classList.remove('active');
+        renderGrammarInfo();
+    }
+
+    var tabsOrder = ['grammar', 'flashcards', 'quiz', 'writing', 'progress', 'ai', 'russian-ai-voice'];
+    var currentTabIndex = 0;
+
+    function getXP() { return parseInt(localStorage.getItem('russe_xp') || '0'); }
+    function addXP(pts) { localStorage.setItem('russe_xp', getXP() + pts); if (tabsOrder[currentTabIndex] === 'progress') renderProgressView(); }
+
+    function getErrors() { try { return JSON.parse(localStorage.getItem('russe_errors') || '[]'); } catch(e) { return []; } }
+
+    function addError(errObj) {
+        let errs = getErrors().filter(e => e.question !== errObj.question);
+        errs.unshift(errObj);
+        if (errs.length > 15) errs.pop();
+        localStorage.setItem('russe_errors', JSON.stringify(errs));
+
+        let today = new Date().toISOString().split('T')[0];
+        let dailyErrors = {};
+        try { dailyErrors = JSON.parse(localStorage.getItem('russe_daily_errors') || '{}'); } catch(e) {}
+        dailyErrors[today] = (dailyErrors[today] || 0) + 1;
+        localStorage.setItem('russe_daily_errors', JSON.stringify(dailyErrors));
+    }
+
+    function deleteError(id) { localStorage.setItem('russe_errors', JSON.stringify(getErrors().filter(e => e.id !== id))); renderProgressView(); }
+    function clearErrors() { localStorage.setItem('russe_errors', '[]'); renderProgressView(); }
+
+    function renderProgressView() {
+        var xp = getXP(), level = "A1 (Débutant)", pct = Math.min(100, (xp/100)*100);
+        var encouragement = "Continue tes efforts pour maîtriser les bases du russe !";
+
+        if(xp > 100) { level = "A2 (Élémentaire)"; pct = Math.min(100, ((xp-100)/150)*100); encouragement = "Super progression ! Tu commences à bien intégrer les déclinaisons."; }
+        if(xp > 250) { level = "B1 (Intermédiaire)"; pct = Math.min(100, ((xp-250)/250)*100); encouragement = "Excellent niveau ! Tu manies les cas russes avec brio."; }
+
+        document.getElementById('user-level-title').innerText = "Niveau " + level;
+        document.getElementById('user-score').innerText = xp + " XP";
+        document.getElementById('progress-bar-fill').style.width = pct + "%";
+        document.getElementById('level-encouragement').innerText = encouragement;
+
+        renderErrorsChart();
+
+        var errs = getErrors(), container = document.getElementById('errors-container');
+        let countBadge = document.getElementById('errors-count-badge');
+        countBadge.innerText = `(${errs.length})`;
+
+        document.getElementById('clear-errors-btn').style.display = errs.length ? 'block' : 'none';
+        if (!errs.length) return container.innerHTML = "<p style='color:var(--text-sub); font-size:0.9rem; text-align:center;'>Aucune erreur ! Continue comme ça. 🎉</p>";
+
+        container.innerHTML = errs.map(e => `
+            <div style="border:1px solid #fee2e2; background:#fff5f5; padding:12px; border-radius:14px;">
+                <div style="display:flex; justify-content:space-between; margin-bottom:6px;"><span style="font-size:0.75rem; font-weight:bold; background:#fca5a5; color:#7f1d1d; padding:2px 8px; border-radius:12px;">${e.type}</span><button onclick="deleteError(${e.id})" style="background:none; border:none; color:#991b1b; cursor:pointer;">✖</button></div>
+                <div style="font-weight:bold; margin-bottom:6px;">${e.question}</div>
+                <div style="font-size:0.85rem; color:#b91c1c; margin-bottom:8px;">Ta réponse : <s>${e.wrong}</s></div>
+                <div id="retry-box-${e.id}"><button class="btn btn-outline" style="padding:8px 14px; font-size:0.85rem;" onclick="openRetry(${e.id})">Retravailler cette erreur ✦</button></div>
+            </div>`).join('');
+    }
+
+    function renderErrorsChart() {
+        let svg = document.getElementById('errors-chart');
+        let dailyErrors = {};
+        try { dailyErrors = JSON.parse(localStorage.getItem('russe_daily_errors') || '{}'); } catch(e) {}
+
+        let days = [];
+        for (let i = 6; i >= 0; i--) {
+            let d = new Date();
+            d.setDate(d.getDate() - i);
+            let key = d.toISOString().split('T')[0];
+            let label = d.toLocaleDateString('fr-FR', { weekday: 'narrow' });
+            days.push({ label: label, count: dailyErrors[key] || 0 });
+        }
+
+        let maxCount = Math.max(...days.map(d => d.count), 4);
+        let width = 300, height = 100;
+        let stepX = width / (days.length - 1 || 1);
+
+        let points = days.map((d, index) => {
+            let x = index * stepX;
+            let y = height - (d.count / maxCount) * (height - 20) - 10;
+            return { x: x, y: y, count: d.count, label: d.label };
+        });
+
+        let pathData = points.reduce((acc, p, idx) => idx === 0 ? `M ${p.x} ${p.y}` : `${acc} L ${p.x} ${p.y}`, "");
+
+        let svgContent = `
+            <line x1="0" y1="${height}" x2="${width}" y2="${height}" stroke="#cbd5e1" stroke-width="1.5"/>
+            <path d="${pathData}" fill="none" stroke="url(#geminiGradLine)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+            <defs>
+                <linearGradient id="geminiGradLine" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stop-color="#4285f4"/>
+                    <stop offset="50%" stop-color="#9b51e0"/>
+                    <stop offset="100%" stop-color="#e91e63"/>
+                </linearGradient>
+            </defs>
+        `;
+
+        points.forEach(p => {
+            svgContent += `
+                <circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#9b51e0" stroke="white" stroke-width="2"/>
+                <text x="${p.x}" y="${height + 16}" font-size="10" fill="#64748b" text-anchor="middle">${p.label}</text>
+                <text x="${p.x}" y="${p.y - 8}" font-size="10" font-weight="bold" fill="#1e293b" text-anchor="middle">${p.count}</text>
+            `;
+        });
+
+        svg.innerHTML = svgContent;
+    }
+
+    function openRetry(id) {
+        document.getElementById('retry-box-'+id).innerHTML = `<div style="display:flex; gap:6px;"><input type="text" id="retry-in-${id}" class="input-box" placeholder="Corrige ton erreur..." style="padding:8px;"><button class="btn" style="width:auto; padding:8px 16px;" onclick="checkRetry(${id})">OK</button></div><div id="retry-fb-${id}" style="font-size:0.85rem; margin-top:6px; font-weight:bold;"></div>`;
+    }
+
+    function checkRetry(id) {
+        var e = getErrors().find(x => x.id === id), val = document.getElementById('retry-in-'+id).value.trim().toLowerCase(), fb = document.getElementById('retry-fb-'+id);
+        if (val === e.correct.toLowerCase()) {
+            playSound('success');
+            fb.innerHTML = "<span style='color:#15803d;'>Bravo (+10 XP)</span>";
+            addXP(10);
+            setTimeout(() => deleteError(id), 1000);
+        } else {
+            playSound('error');
+            let hintChar = e.correct[e.correct.length - 1];
+            let secondHint = e.correct.length > 2 ? e.correct[e.correct.length - 2] : e.correct[0];
+            fb.innerHTML = `<span style='color:#b91c1c;'>Indice : avant-dernière lettre '${secondHint}', dernière '${hintChar}' (${e.correct.length} lettres)</span>`;
+        }
+    }
+
+    function renderGrammarInfo() {
+        var d = grammarData[currentSelectedKey];
+        var detailsContainer = document.getElementById('grammar-details');
+
+        detailsContainer.classList.remove('grammar-animate');
+        void detailsContainer.offsetWidth;
+        detailsContainer.classList.add('grammar-animate');
+
+        detailsContainer.innerHTML = `
+            <h3 style='margin-top:14px; font-size:1.05rem; color:var(--gemini-blue);'>${d.title}</h3>
+            <p style='margin-top:6px; font-size:0.95rem;'><b>Questions :</b> ${d.question}</p>
+            <p style='margin-top:4px; font-size:0.9rem;'><b>Rôle principal :</b> ${d.role}</p>
+            <div class='badge-info'><b>Prépositions clés :</b><br>${d.prepositions}</div>
+            <p style='margin-top:14px; font-weight:bold; font-size:0.9rem;'>Terminaisons des Noms :</p>
+            <table class='grammar-table'>
+                <thead><tr><th>Genre</th><th>Singulier</th><th>Pluriel</th></tr></thead>
+                <tbody>${d.endings.map(e => `<tr><td><b>${e.genre}</b></td><td>${e.sing}</td><td>${e.plur}</td></tr>`).join('')}</tbody>
+            </table>
+            <div class='badge-exception'><b>Exceptions & Pièges :</b><br>${d.exceptions}</div>
+            <div class='badge-examples'><b>Exemples pratiques :</b><br>${d.examples.join('<br>')}</div>
+        `;
+    }
+
+    const RUSSIAN_AI_API_KEY = "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";
+
+    async function callRussianAiForExercise(promptText) {
+        try {
+            const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${RUSSIAN_AI_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: "llama-3.3-70b-versatile",
+                    messages: [
+                        { role: "system", content: "Tu es un générateur d'exercices de russe sous format JSON strict. RÈGLE ABSOLUE : Les phrases générées en russe doivent obligatoirement comporter minimum 5 mots et maximum 7 mots (min 5, max 7 mots par phrase), et être 100% en alphabet cyrillique russe pur (aucun mot en français dans la phrase russe). Aucune phrase ne doit se répéter d'un appel à l'autre et elles doivent être totalement différentes dans les 3 onglets d'exercices (flashcards, quiz et écriture). Réponds UNIQUEMENT avec un objet JSON valide, sans texte additionnel, sans balises markdown." },
+                        { role: "user", content: promptText + " (ID aléatoire: " + Math.random() + ")" }
+                    ],
+                    temperature: 1.0
+                })
+            });
+            if (!response.ok) throw new Error("Erreur HTTP API");
+            const data = await response.json();
+            if (!data.choices || !data.choices[0] || !data.choices[0].message) throw new Error("Format réponse invalide");
+
+            let content = data.choices[0].message.content.trim();
+            if (content.startsWith("```json")) {
+                content = content.replace(/^```json/, "").replace(/```$/, "").trim();
+            } else if (content.startsWith("```")) {
+                content = content.replace(/^```/, "").replace(/```$/, "").trim();
+            }
+            return JSON.parse(content);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    var currQzAns, currWrAns, currWrQ, currWrHint;
+    var currFcTranslation = "", currQzTranslation = "", currWrTranslation = "";
+    var fcTranslVisible = false, qzTranslVisible = false, wrTranslVisible = false;
+
+    function toggleTranslation(type) {
+        if (type === 'flashcards') {
+            fcTranslVisible = !fcTranslVisible;
+            let el = document.getElementById('fc-translation');
+            el.innerText = currFcTranslation || "Traduction non disponible";
+            el.style.display = fcTranslVisible ? 'block' : 'none';
+        } else if (type === 'quiz') {
+            qzTranslVisible = !qzTranslVisible;
+            let el = document.getElementById('quiz-translation');
+            el.innerText = currQzTranslation || "Traduction non disponible";
+            el.style.display = qzTranslVisible ? 'block' : 'none';
+        } else if (type === 'writing') {
+            wrTranslVisible = !wrTranslVisible;
+            let el = document.getElementById('writing-translation');
+            el.innerText = currWrTranslation || "Traduction non disponible";
+            el.style.display = wrTranslVisible ? 'block' : 'none';
+        }
+    }
+
+    async function generateNextQuiz() {
+        qzTranslVisible = false;
+        let qzTransEl = document.getElementById('quiz-translation');
+        if (qzTransEl) qzTransEl.style.display = 'none';
+
+        document.getElementById('quiz-question').innerText = "Génération de la question par Russian AI... ✦";
+        document.getElementById('quiz-options').innerHTML = "";
+        document.getElementById('quiz-feedback').innerText = "";
+        document.getElementById('quiz-next-btn').style.display = 'none';
+
+        const themes = ["la vie quotidienne", "les animaux", "la nature", "la ville", "la famille", "les loisirs", "l'école", "le voyage", "la nourriture", "le sport"];
+        let randomTheme = themes[Math.floor(Math.random() * themes.length)];
+
+        let prompt = `Génère une question de quiz de grammaire russe originale, inédite et variée sur le thème "${randomTheme}", avec une phrase de minimum 5 mots et maximum 7 mots au total.
+        RÈGLES ABSOLUES :
+        1. La phrase et la question doivent être EXCLUSIVEMENT en russe (alphabet cyrillique), aucun mot en français dans la phrase russe.
+        2. Le mot entre parenthèses doit obligatoirement être sous sa forme de base (dictionnaire / nominatif), non décliné, afin que l'utilisateur doive le décliner. La phrase ne doit pas contenir la réponse déjà déclinée.
+        3. Cette phrase doit être totalement différente de celles utilisées pour les flashcards ou l'écriture.
+        Sous forme d'un objet JSON strict avec les clés suivantes :
+        {
+          "question": "Phrase de 5 à 7 mots en russe avec un mot entre parenthèses à sa forme de base",
+          "correct": "La bonne déclinaison exacte du mot entre parenthèses en cyrillique",
+          "options": ["tableau de 4 options de déclinaisons possibles du mot entre parenthèses en cyrillique incluant la bonne réponse"],
+          "translation": "Traduction exacte de la phrase en français"
+        }`;
+
+        let res = await callRussianAiForExercise(prompt);
+        if (!res || !res.question || !res.correct || !res.options) {
+            const fallbackQuizzes = [
+                { question: "Я вижу красивый новый (дом)", correct: "дом", options: ["дом", "дома", "доме", "дому"], translation: "Je vois une belle maison neuve." },
+                { question: "Мы читаем очень интересную (книга)", correct: "книгу", options: ["книга", "книги", "книге", "книгу"], translation: "Nous lisons un livre très intéressant." },
+                { question: "Маленькие дети гуляют в (парк)", correct: "парке", options: ["парк", "парка", "парке", "парку"], translation: "Les petits enfants se promènent dans le parc." },
+                { question: "Добрая мама купила вкусный (хлеб)", correct: "хлеб", options: ["хлеб", "хлеба", "хлебе", "хлебу"], translation: "La gentille maman a acheté du pain délicieux." },
+                { question: "У меня нет верной (подруга)", correct: "подруги", options: ["подруга", "подругу", "подруги", "подруге"], translation: "Je n'ai pas d'amie fidèle." },
+                { question: "Он звонит своему старому (друг)", correct: "другу", options: ["друг", "друга", "другу", "другом"], translation: "Il appelle son vieil ami." }
+            ];
+            res = fallbackQuizzes[Math.floor(Math.random() * fallbackQuizzes.length)];
+        }
+
+        currQzAns = res.correct;
+        currQzTranslation = res.translation || "";
+        document.getElementById('quiz-question').innerText = res.question;
+        let opts = res.options.sort(() => Math.random() - 0.5);
+        document.getElementById('quiz-options').innerHTML = opts.map(o => `<button class="quiz-opt" onclick="checkQuiz(this, '${o}', '${res.question}')">${o}</button>`).join('');
+    }
+
+    function checkQuiz(btn, sel, qText) {
+        document.querySelectorAll('.quiz-opt').forEach(b => b.disabled = true);
+        let fb = document.getElementById('quiz-feedback');
+        if (sel === currQzAns) {
+            playSound('success');
+            btn.classList.add('correct');
+            fb.innerText = "correct";
+            fb.style.color = "#276749";
+            addXP(10);
+        } else {
+            playSound('error');
+            btn.classList.add('wrong');
+            fb.innerText = "incorrect";
+            fb.style.color = "#9b2c2c";
+            addError({id: Date.now(), question: qText, wrong: sel, correct: currQzAns, type: "Quiz"});
+        }
+        document.getElementById('quiz-next-btn').style.display = 'block';
+    }
+
+    async function loadNextWritingPrompt() {
+        wrTranslVisible = false;
+        let wrTransEl = document.getElementById('writing-translation');
+        if (wrTransEl) wrTransEl.style.display = 'none';
+
+        document.getElementById('animated-writing-prompt').innerText = "Génération par Russian AI... ✦";
+        document.getElementById('writing-input').value = '';
+        document.getElementById('writing-feedback').innerText = '';
+
+        const themes = ["la nature", "la maison", "les amis", "le travail", "la ville", "le sport", "la musique", "les vacances", "la cuisine"];
+        let randomTheme = themes[Math.floor(Math.random() * themes.length)];
+
+        let prompt = `Génère un exercice d'écriture russe original, inédite et varié sur le thème "${randomTheme}", avec une phrase de minimum 5 mots et maximum 7 mots au total.
+        RÈGLES STRICTES :
+        1. La phrase (\`prompt\`) doit être entièrement et exclusivement en alphabet cyrillique russe (minimum 5 mots, maximum 7 mots). Aucun mot en français dans la phrase russe.
+        2. Le mot entre parenthèses doit être à sa forme de base (dictionnaire).
+        3. Cette phrase doit être totalement différente de celles utilisées pour le quiz et les flashcards.
+        Réponds sous forme d'un objet JSON strict avec les clés suivantes :
+        {
+          "prompt": "Phrase de 5 à 7 mots en russe avec un mot entre parenthèses sous sa forme de base",
+          "correct": "La phrase complète corrigée avec le mot correctement décliné en cyrillique",
+          "hint": "Un indice utile en français (ex: la traduction du mot entre parenthèses ou la règle du cas à appliquer)",
+          "translation": "Traduction exacte de la phrase en français"
+        }`;
+
+        let res = await callRussianAiForExercise(prompt);
+        if (!res || !res.prompt || !res.correct) {
+            const fallbackWritings = [
+                { prompt: "У меня нет новой (машина)", correct: "У меня нет новой машины", hint: "Utilise le génitif féminin singulier.", translation: "Je n'ai pas de voiture neuve." },
+                { prompt: "Я пишу длинное письмо (друг)", correct: "Я пишу длинное письмо другу", hint: "Utilise le datif masculin singulier.", translation: "J'écris une longue lettre à un ami." },
+                { prompt: "Мы живем в большом (город)", correct: "Мы живем в большом городе", hint: "Utilise le prépositionnel avec в.", translation: "Nous habitons dans une grande ville." },
+                { prompt: "Она пьет крепкий чай с (лимон)", correct: "Она пьет крепкий чай с лимоном", hint: "Utilise l'instrumental (с + instrumental).", translation: "Elle boit du thé fort avec du citron." },
+                { prompt: "Студент читает интересную новую (книга)", correct: "Студент читает интересную новую книгу", hint: "Utilise l'accusatif féminin singulier.", translation: "L'étudiant lit un nouveau livre intéressant." }
+            ];
+            res = fallbackWritings[Math.floor(Math.random() * fallbackWritings.length)];
+        }
+
+        currWrAns = res.correct;
+        currWrQ = res.prompt;
+        currWrHint = res.hint || "Décline le mot entre parenthèses selon le cas approprié.";
+        currWrTranslation = res.translation || "";
+        let words = currWrQ.split(' ');
+        let htmlWords = words.map(w => `<span class="read-word">${w}</span>`).join(' ');
+
+        document.getElementById('animated-writing-prompt').innerHTML = `${htmlWords}`;
+    }
+
+    function checkWriting() {
+        let val = document.getElementById('writing-input').value.trim(), fb = document.getElementById('writing-feedback');
+        if (val.toLowerCase() === currWrAns.toLowerCase()) {
+            playSound('success');
+            fb.innerText = "correct";
+            fb.style.color = "#276749";
+            addXP(15);
+            setTimeout(loadNextWritingPrompt, 3500);
+        } else {
+            playSound('error');
+            fb.innerText = "incorrect";
+            fb.style.color = "#9b2c2c";
+            addError({id: Date.now(), question: currWrQ, wrong: val||"vide", correct: currWrAns, type: "Écriture"});
+        }
+    }
+
+    function showWritingHint() {
+        let fb = document.getElementById('writing-feedback');
+        fb.innerText = `Indice : ${currWrHint}`;
+        fb.style.color = "var(--gemini-blue)";
+    }
+
+    let cardFlippedCount = 0;
+
+    async function generateNextFlashcard() {
+        fcTranslVisible = false;
+        let fcTransEl = document.getElementById('fc-translation');
+        if (fcTransEl) fcTransEl.style.display = 'none';
+
+        cardFlippedCount = 0;
+        document.getElementById('flashcard').classList.remove('flipped');
+        document.getElementById('fc-front-ru').innerText = "...";
+        document.getElementById('fc-front-prompt').innerText = "Décline le mot";
+        document.getElementById('fc-back-ru').innerText = "...";
+        document.getElementById('fc-back-exp').innerText = "...";
+
+        const themes = ["la vie quotidienne", "les voyages", "la nourriture", "la météo", "les études", "les loisirs", "la famille", "la nature"];
+        let randomTheme = themes[Math.floor(Math.random() * themes.length)];
+
+        let prompt = `Génère une flashcard de grammaire russe originale, inédite et variée sur le thème "${randomTheme}".
+        RÈGLES STRICTES :
+        1. La phrase russe au recto (frontRu) doit comporter minimum 5 mots et maximum 7 mots, et obligatoirement en alphabet cyrillique russe pur (aucun mot en français dans le recto). Le mot entre parenthèses doit être à sa forme de base (dictionnaire).
+        2. Cette phrase doit être totalement différente de celles utilisées pour le quiz et l'écriture.
+        3. Tout le contenu textuel du recto et de la réponse au dos (frontRu, backRu) doit être EXCLUSIVEMENT en alphabet cyrillique russe (aucun mot en français sur les faces russes).
+        4. L'explication au dos (backExp) doit expliquer clairement pourquoi ce cas et cette terminaison sont utilisés, en restant structurée et lisible sans déborder du cadre (en français).
+        Réponds sous forme d'un objet JSON strict avec les clés suivantes :
+        {
+          "frontRu": "Phrase de 5 à 7 mots en russe avec un mot entre parenthèses sous sa forme de base",
+          "backRu": "La phrase correcte en cyrillique avec le mot décliné",
+          "backExp": "Explication détaillée en français (pourquoi ce cas, pourquoi cette terminaison...)",
+          "translation": "Traduction exacte de la phrase du recto en français"
+        }`;
+
+        let res = await callRussianAiForExercise(prompt);
+        if (!res || !res.frontRu) {
+            const fallbackFlashcards = [
+                { frontRu: "Я сегодня иду в (парк)", backRu: "Я сегодня иду в парк", backExp: "Verbe de mouvement + direction -> Accusatif inanimé (identique au nominatif).", translation: "Je vais au parc aujourd'hui." },
+                { frontRu: "Это новая машина моего (брат)", backRu: "Это новая машина моего брата", backExp: "Marque la possession -> Génitif masculin singulier (-а).", translation: "C'est la nouvelle voiture de mon frère." },
+                { frontRu: "Мы всегда помогаем нашей (мама)", backRu: "Мы всегда помогаем нашей маме", backExp: "Verbe nécessitant le datif -> Datif féminin singulier (-е).", translation: "Nous aidons toujours notre maman." },
+                { frontRu: "Он долго говорит о (фильм)", backRu: "Он долго говорит о фильме", backExp: "Préposition о + lieu/sujet -> Prépositionnel masculin singulier (-е).", translation: "Il parle longtemps du film." },
+                { frontRu: "У меня совсем нет (время)", backRu: "У меня совсем нет времени", backExp: "Absence avec нет -> Génitif neutre en -мя (-я / -ен-).", translation: "Je n'ai pas du tout le temps." }
+            ];
+            res = fallbackFlashcards[Math.floor(Math.random() * fallbackFlashcards.length)];
+        }
+
+        document.getElementById('fc-front-ru').innerText = res.frontRu;
+        document.getElementById('fc-front-prompt').innerText = "Décline le mot";
+        document.getElementById('fc-back-ru').innerText = res.backRu;
+        document.getElementById('fc-back-exp').innerText = res.backExp;
+        currFcTranslation = res.translation || "";
+    }
+
+    function flipCard() {
+        if (cardFlippedCount >= 1) return;
+        cardFlippedCount++;
+        playSound('flip');
+        document.getElementById('flashcard').classList.toggle('flipped');
+    }
+
+    function resetChatBox() {
+        let box = document.getElementById('chat-box');
+        box.innerHTML = `<div class='msg ai'>Привет! Я RussianAI, твой помощник по русской грамматике. Какой падеж мы разберем сегодня? ✦</div>`;
+    }
+
+    function formatAiResponse(text, isBilingual) {
+        let cleanText = text.replace(/\*\*(Russe|Français|Русский|Французский)\s*:?\*\*/gi, '')
+                            .replace(/^(Russe|Français|Русский|Французский)\s*:?/gim, '')
+                            .trim();
+
+        cleanText = cleanText.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+        cleanText = cleanText.replace(/([.!?])\s+([A-ZА-ЯЁ])/g, '$1\n\n$2');
+
+        if (!isBilingual) return cleanText;
+
+        let paragraphs = cleanText.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+        let ruBlocks = [];
+        let frBlocks = [];
+
+        paragraphs.forEach(p => {
+            let trimmed = p.trim();
+            let hasCyrillic = /[А-яЁё]/.test(trimmed);
+            let hasFrenchChars = /[àâäéèêëîïôöùûüçœæ]/i.test(trimmed) || /^(le|la|les|un|une|des|et|ou|mais|donc|or|ni|car|en|à|par|pour|sur|sous|avec|sans|que|qui|ce|c'est)\b/i.test(trimmed);
+
+            if (hasCyrillic && !hasFrenchChars) {
+                ruBlocks.push(trimmed);
+            } else if (hasFrenchChars && !hasCyrillic) {
+                frBlocks.push(trimmed);
+            } else {
+                let cyrCount = (trimmed.match(/[А-яЁё]/g) || []).length;
+                let latCount = (trimmed.match(/[a-zA-Z]/g) || []).length;
+                if (cyrCount >= latCount) {
+                    ruBlocks.push(trimmed);
+                } else {
+                    frBlocks.push(trimmed);
+                }
+            }
+        });
+
+        if (frBlocks.length === 0 || ruBlocks.length === 0) {
+            return cleanText;
+        }
+
+        return `
+            <div class="ai-lang-section">
+                <span class="ai-lang-badge ru">🇷🇺 Russe</span>
+                <div style="color: #0f172a; line-height: 1.6;">${ruBlocks.join('<br><br>')}</div>
+            </div>
+            <div class="ai-lang-section">
+                <span class="ai-lang-badge fr">🇫🇷 Français</span>
+                <div style="color: #475569; line-height: 1.6;">${frBlocks.join('<br><br>')}</div>
+            </div>
+        `;
+    }
+
+    function typeStreamText(element, text, callback, isBilingual = false) {
+        element.innerHTML = "";
+        let htmlStr = isBilingual ? formatAiResponse(text, true) : formatAiResponse(text, false);
+
+        let tempDiv = document.createElement("div");
+        tempDiv.innerHTML = htmlStr;
+
+        function animateNode(sourceNode, targetNode, onComplete) {
+            let children = Array.from(sourceNode.childNodes);
+            let i = 0;
+
+            function nextChild() {
+                if (i >= children.length) {
+                    if (onComplete) onComplete();
+                    return;
+                }
+                let child = children[i];
+
+                if (child.nodeType === Node.TEXT_NODE) {
+                    let textContent = child.textContent;
+
+                    if (!textContent.trim()) {
+                        targetNode.appendChild(document.createTextNode(textContent));
+                        i++;
+                        nextChild();
+                        return;
+                    }
+
+                    let tokens = textContent.split(/(\s+)/);
+                    let wIndex = 0;
+
+                    function nextWord() {
+                        if (wIndex >= tokens.length) {
+                            i++;
+                            nextChild();
+                            return;
+                        }
+                        let token = tokens[wIndex];
+                        if (token.trim().length === 0) {
+                            targetNode.appendChild(document.createTextNode(token));
+                        } else {
+                            let span = document.createElement("span");
+                            span.className = "streaming-word";
+                            span.textContent = token;
+                            targetNode.appendChild(span);
+                        }
+                        wIndex++;
+                        let chatBox = document.getElementById('chat-box');
+                        if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
+
+                        setTimeout(nextWord, 12);
+                    }
+                    nextWord();
+
+                } else if (child.nodeType === Node.ELEMENT_NODE) {
+                    let clone = child.cloneNode(false);
+                    targetNode.appendChild(clone);
+                    animateNode(child, clone, () => {
+                        i++;
+                        nextChild();
+                    });
+                }
+            }
+            nextChild();
+        }
+
+        animateNode(tempDiv, element, callback);
+    }
+
+    function handleChatKeyPress(event) {
+        if (event.key === 'Enter') {
+            sendChatMessage();
+        }
+    }
+
+    async function sendChatMessage() {
+        let input = document.getElementById('chat-input'), rawText = input.value.trim(), box = document.getElementById('chat-box');
+        if(!rawText) return;
+
+        let isRawOnly = rawText.startsWith('/-');
+        let cleanPrompt = isRawOnly ? rawText.replace('/-', '').trim() : rawText;
+
+        box.innerHTML += `<div class='msg user'>${rawText}</div><div class='msg ai typing' id='ai-loading'>RussianAI réfléchit...</div>`;
+        input.value = '';
+        box.scrollTop = box.scrollHeight;
+
+        let isBilingual = cleanPrompt.includes('/fr');
+
+        let systemInstruction = "Tu es 'RussianAI', un assistant expert en grammaire russe. " +
+            "Sois libre et flexible dans tes réponses, sans structure rigide obligatoire, mais concentre-toi sur la grammaire russe, la clarté, l'utilisation correcte de la ponctuation, des sauts de ligne et de la mise en forme en gras (ex: **texte**). " +
+            "Garde toujours les termes, sons et lettres russes en alphabet cyrillique authentique, sans traduction phonétique bizarre. " +
+            "Règle absolue pour les phrases d'exemple : dans les exemples donnés en français, l'entièreté des phrases (uniquement les phrases exemple) doivent impérativement rester en russe.";
+
+        if (isRawOnly) {
+            systemInstruction = "Donne UNIQUEMENT la réponse directe et brute à la question posée, sans explication, sans introduction, sans salutation ni quoi que ce soit d'autre. Tu dois obligatoirement forcer le mode russe (réponse intégralement rédigée en russe).";
+        } else if (isBilingual) {
+            systemInstruction += " L'utilisateur a utilisé /fr. Fournis une explication complète comprenant d'abord l'intégralité du texte explicatif rédigé en russe, puis en dessous, fournis l'intégralité de sa traduction en français de manière parfaitement distincte et séparée, sans entremêler les lignes ou les paragraphes des deux langues.";
+        } else {
+            systemInstruction += " Réponds entièrement en russe avec une mise en forme soignée.";
+        }
+
+        try {
+            const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${RUSSIAN_AI_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: "llama-3.3-70b-versatile",
+                    messages: [
+                        { role: "system", content: systemInstruction },
+                        { role: "user", content: cleanPrompt }
+                    ]
+                })
+            });
+
+            if (!response.ok) throw new Error("Erreur réseau API");
+            const data = await response.json();
+            let loadingEl = document.getElementById('ai-loading');
+            if (loadingEl) loadingEl.remove();
+
+            let aiResponseText = "Désolé, une erreur est survenue.";
+            if (data && data.choices && data.choices[0].message.content) {
+                aiResponseText = data.choices[0].message.content;
+            }
+
+            let aiMsg = document.createElement('div');
+            aiMsg.className = 'msg ai';
+            box.appendChild(aiMsg);
+
+            if (isRawOnly) {
+                aiMsg.textContent = aiResponseText;
+                box.scrollTop = box.scrollHeight;
+            } else {
+                typeStreamText(aiMsg, aiResponseText, () => {
+                    box.scrollTop = box.scrollHeight;
+                }, isBilingual);
+            }
+
+        } catch (error) {
+            let loadingEl = document.getElementById('ai-loading');
+            if (loadingEl) loadingEl.remove();
+            let aiMsg = document.createElement('div');
+            aiMsg.className = 'msg ai';
+            aiMsg.textContent = "Erreur de connexion avec l'API Russian AI. ✦";
+            box.appendChild(aiMsg);
+            box.scrollTop = box.scrollHeight;
+        }
+    }
+
+    // Variables de configuration vocale et paramètres
+    let voiceSettings = {
+        speed: 1.0,
+        gender: 'female',
+        level: 'beginner'
+    };
+
+    function openVoiceSettings() {
+        document.getElementById('setting-speed').value = voiceSettings.speed;
+        document.getElementById('speed-val').innerText = voiceSettings.speed + 'x';
+
+        let genderLabels = { 'female': 'Femme', 'male': 'Homme' };
+        document.getElementById('currentGenderLabel').innerText = genderLabels[voiceSettings.gender] || 'Femme';
+        document.querySelectorAll('#genderOptions .custom-dropdown-item').forEach(item => {
+            if(item.getAttribute('onclick').includes(`'${voiceSettings.gender}'`)) {
+                item.classList.add('selected');
+            } else {
+                item.classList.remove('selected');
+            }
+        });
+
+        let levelLabels = {
+            'beginner': '1. Débutant (Simple et lent)',
+            'intermediate': '2. Intermédiaire (Courant)',
+            'advanced': '3. Confirmé (Avancé & soutenu)'
+        };
+        document.getElementById('currentLevelLabel').innerText = levelLabels[voiceSettings.level] || levelLabels['beginner'];
+        document.querySelectorAll('#levelOptions .custom-dropdown-item').forEach(item => {
+            if(item.getAttribute('onclick').includes(`'${voiceSettings.level}'`)) {
+                item.classList.add('selected');
+            } else {
+                item.classList.remove('selected');
+            }
+        });
+
+        document.getElementById('voice-settings-modal').classList.add('active');
+    }
+
+    function closeVoiceSettings() {
+        document.getElementById('voice-settings-modal').classList.remove('active');
+    }
+
+    function closeVoiceSettingsOnOutside(e) {
+        if (e.target.id === 'voice-settings-modal') {
+            closeVoiceSettings();
+        }
+    }
+
+    function updateVoiceSettingPreview() {
+        let speed = document.getElementById('setting-speed').value;
+        document.getElementById('speed-val').innerText = speed + 'x';
+    }
+
+    function saveVoiceSettings() {
+        voiceSettings.speed = parseFloat(document.getElementById('setting-speed').value);
+
+        let levelPrompt = "";
+        if (voiceSettings.level === 'beginner') {
+            levelPrompt = "Tu es un agent conversationnel IA amical. Tu parles UNIQUEMENT en russe très simple et lent (niveau débutant), avec des mots basiques et des phrases très courtes. À la fin de chaque réponse, pose une question simple.";
+        } else if (voiceSettings.level === 'intermediate') {
+            levelPrompt = "Tu es un agent conversationnel IA amical. Tu parles en russe de niveau intermédiaire, avec un vocabulaire courant, des structures naturelles et des phrases de longueur moyenne. À la fin de chaque réponse, pose une question simple.";
+        } else {
+            levelPrompt = "Tu es un agent conversationnel IA amical. Tu parles en russe de niveau confirmé/avancé, avec un langage riche, fluide et soutenu. À la fin de chaque réponse, pose une question pour prolonger la discussion.";
+        }
+
+        if (voiceConversationHistory.length > 0 && voiceConversationHistory[0].role === 'system') {
+            voiceConversationHistory[0].content = levelPrompt;
+        } else {
+            voiceConversationHistory.unshift({ role: "system", content: levelPrompt });
+        }
+
+        closeVoiceSettings();
+    }
+
+    let voiceConversationHistory = [
+        { role: "system", content: "Tu es un agent conversationnel IA amical. Tu parles UNIQUEMENT en russe simple et lent (niveau débutant/intermédiaire), avec des phrases courtes et faciles à comprendre. À la fin de chaque réponse, pose une question simple pour poursuivre la discussion." }
+    ];
+    let isRecording = false;
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let audioStream = null;
+
+    function switchToRussianAiVoiceTab() {
+        switchTab('russian-ai-voice');
+        if (voiceConversationHistory.length === 1) {
+            let initialGreeting = "Привет! Как твои дела? Как проходит твой день?";
+            voiceConversationHistory.push({ role: "assistant", content: initialGreeting });
+            animateVoiceResponseText(initialGreeting);
+            speakRussianText(initialGreeting);
+        }
+    }
+
+    async function startVoiceRecording() {
+        if (isRecording) return;
+
+        let statusEl = document.getElementById('voice-status');
+        let micBtn = document.getElementById('mic-btn');
+
+        if (!ttsUnlocked && 'speechSynthesis' in window) {
+            let unlock = new SpeechSynthesisUtterance('');
+            window.speechSynthesis.speak(unlock);
+            ttsUnlocked = true;
+        }
+
+        try {
+            if (typeof getAudioContext === 'function') {
+                getAudioContext().resume();
+            }
+
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                const getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
+                if (getUserMedia) {
+                     audioStream = await new Promise((resolve, reject) => {
+                        getUserMedia.call(navigator, { audio: true, video: false }, resolve, reject);
+                     });
+                } else {
+                    throw new Error("L'API MediaDevices n'est pas supportée dans cet environnement.");
+                }
+            } else {
+                audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            }
+
+            audioChunks = [];
+
+            let options = {};
+            if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                options = { mimeType: 'audio/webm;codecs=opus' };
+            } else if (MediaRecorder.isTypeSupported('audio/webm')) {
+                options = { mimeType: 'audio/webm' };
+            } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+                options = { mimeType: 'audio/mp4' };
+            }
+
+            mediaRecorder = new MediaRecorder(audioStream, options);
+
+            mediaRecorder.ondataavailable = event => {
+                if (event.data && event.data.size > 0) {
+                    audioChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = async () => {
+                let mime = mediaRecorder.mimeType || 'audio/webm';
+                let audioBlob = new Blob(audioChunks, { type: mime });
+                if (statusEl) statusEl.innerText = "Transcription Russian AI (Whisper) en cours... ✦";
+
+                try {
+                    const formData = new FormData();
+                    formData.append("file", audioBlob, "audio.webm");
+                    formData.append("model", "whisper-large-v3-turbo");
+                    formData.append("language", "ru");
+
+                    const transcriptionResponse = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${RUSSIAN_AI_API_KEY}`
+                        },
+                        body: formData
+                    });
+
+                    if (!transcriptionResponse.ok) {
+                         const errorData = await transcriptionResponse.json();
+                         throw new Error(`Erreur API Russian AI: ${errorData.error?.message || transcriptionResponse.status}`);
+                    }
+
+                    const result = await transcriptionResponse.json();
+                    let speechResult = result.text ? result.text.trim() : "";
+
+                    if (!speechResult) {
+                        if (statusEl) statusEl.innerText = "Aucune parole détectée. Réessaie.";
+                        return;
+                    }
+
+                    if (statusEl) statusEl.innerText = "Tu as dit : \"" + speechResult + "\"";
+                    if (typeof voiceConversationHistory !== 'undefined') {
+                        voiceConversationHistory.push({ role: "user", content: speechResult });
+                    }
+
+                    setTimeout(() => {
+                        if (typeof fetchRussianAiVoiceResponse === 'function') {
+                            fetchRussianAiVoiceResponse();
+                        }
+                    }, 500);
+
+                } catch (err) {
+                    if (statusEl) statusEl.innerText = "Erreur de transcription : " + (err.message || "Problème réseau");
+                } finally {
+                    if(audioStream) {
+                        audioStream.getTracks().forEach(track => track.stop());
+                        audioStream = null;
+                    }
+                }
+            };
+
+            mediaRecorder.start();
+            isRecording = true;
+            if (statusEl) statusEl.innerText = "Écoute en cours... Parle en russe ! Relâche pour envoyer.";
+            if (micBtn) {
+                micBtn.style.background = "#fee2e2";
+                micBtn.style.color = "#dc2626";
+            }
+
+        } catch (e) {
+            let errorMessage = e.message || e.name || "Erreur inconnue";
+            if (e.name === 'NotAllowedError' || e.name === 'SecurityError') {
+                errorMessage = "Permission refusée. Vérifiez les autorisations du micro.";
+            } else if (e.name === 'NotFoundError') {
+                errorMessage = "Aucun microphone détecté.";
+            }
+
+            if (statusEl) statusEl.innerText = "Erreur micro : " + errorMessage;
+            stopRecordingUI();
+        }
+    }
+
+    function stopAndSendRecording() {
+        if (!isRecording) return;
+        stopRecordingUI();
+
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+        } else {
+            if(audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+                audioStream = null;
+            }
+        }
+    }
+
+    function stopRecordingUI() {
+        isRecording = false;
+        let micBtn = document.getElementById('mic-btn');
+        if (micBtn) {
+            micBtn.style.background = "";
+            micBtn.style.color = "";
+        }
+    }
+
+    const micButton = document.getElementById('mic-btn');
+    if (micButton) {
+        micButton.onmousedown = (e) => { e.preventDefault(); startVoiceRecording(); };
+        micButton.ontouchstart = (e) => { e.preventDefault(); startVoiceRecording(); };
+
+        micButton.onmouseup = (e) => { e.preventDefault(); stopAndSendRecording(); };
+        micButton.ontouchend = (e) => { e.preventDefault(); stopAndSendRecording(); };
+        micButton.ontouchcancel = (e) => { e.preventDefault(); stopAndSendRecording(); };
+    }
+
+    async function fetchRussianAiVoiceResponse() {
+        let statusEl = document.getElementById('voice-status');
+        statusEl.innerText = "RussianAI réfléchit...";
+
+        try {
+            const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${RUSSIAN_AI_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: "llama-3.3-70b-versatile",
+                    messages: voiceConversationHistory
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            let aiResponseText = "Привет! Давай поговорим еще.";
+            if (data && data.choices && data.choices[0].message.content) {
+                aiResponseText = data.choices[0].message.content;
+            }
+
+            voiceConversationHistory.push({ role: "assistant", content: aiResponseText });
+            statusEl.innerText = "RussianAI parle...";
+
+            animateVoiceResponseText(aiResponseText, () => {
+                statusEl.innerText = "Maintiens le bouton enfoncé pour parler";
+                speakRussianText(aiResponseText);
+            });
+
+        } catch (error) {
+            statusEl.innerText = "Erreur de connexion Russian AI. Veuillez réessayer.";
+        }
+    }
+
+    function animateVoiceResponseText(text, callback) {
+        let container = document.getElementById('voice-display-container');
+        container.innerHTML = "";
+        let words = text.split(/(\s+)/);
+
+        let index = 0;
+        function addNextWord() {
+            if (index >= words.length) {
+                if (callback) callback();
+                return;
+            }
+            let w = words[index];
+            if (w.trim().length === 0) {
+                container.appendChild(document.createTextNode(w));
+            } else {
+                let span = document.createElement("span");
+                span.className = "streaming-word";
+                span.textContent = w;
+                container.appendChild(span);
+            }
+            index++;
+            setTimeout(addNextWord, 40);
+        }
+        addNextWord();
+    }
+
+    // ============================================================
+    // EDGE-TTS : synthèse vocale gratuite via le protocole non-officiel
+    // "Lire à voix haute" de Microsoft Edge (mêmes voix qu'Azure Neural,
+    // sans compte, sans clé API, sans quota).
+    //
+    // IMPORTANT : le navigateur/WebView ne permet pas de définir le header
+    // "Origin" requis par le serveur Microsoft, donc on passe par une
+    // fonction serverless Netlify (netlify/functions/edge-tts.js) qui fait
+    // la connexion WebSocket côté serveur et nous renvoie l'audio en MP3.
+    //
+    // ⚠️ Remplace l'URL ci-dessous par le domaine Netlify réel de ton app.
+    // ============================================================
     const EDGE_TTS_PROXY_URL = "https://effervescent-parfait-5c028a.netlify.app/netlify/functions/edge-tts";
 
     async function synthesizeWithEdgeTTS(text, voiceName, ratePercent, pitchHz) {
