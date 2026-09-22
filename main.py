@@ -68,8 +68,8 @@ def load_model():
         package = torch.package.PackageImporter(str(MODEL_FILE))
         loaded = package.load_pickle("tts_models", "model")
         loaded.to(torch.device("cpu"))
-        loaded.eval()
-
+        # Silero v5.5 est un TTSModelMultiAcc_v3 packagé ;
+        # il ne fournit pas .eval() comme un nn.Module classique.
         model = loaded
         print("Silero prêt.")
         return model
