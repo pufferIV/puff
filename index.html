@@ -6144,39 +6144,27 @@ async function setCachedAudio(key, blob) {
 // ============================================================
 // LOCAL RUSSIAN TTS — SHERPA-ONNX
 //
-// Monsieur  -> Piper Ruslan medium / Sherpa-ONNX VITS
-// Madame    -> Supertonic 3 F1 / Sherpa-ONNX
+// Monsieur -> Piper Russian ru_RU-ruslan-medium / VITS
+// Madame   -> Supertonic 3 / F1
 //
-// Aucun serveur.
-// Aucun Silero.
-// Aucun Edge TTS.
-// Tout est généré localement sur Android.
+// La génération et la lecture sont effectuées nativement par Android.
+// Aucun serveur TTS, Silero ou Edge TTS n'est utilisé ici.
 // ============================================================
 
 let ttsPlaybackId = 0;
 
 function stopAllTts() {
-
     ttsPlaybackId++;
 
-    /*
-     * Stop native Sherpa-ONNX playback.
-     */
-    if (window.AndroidTTS) {
+    // Arrête le moteur Sherpa-ONNX natif.
+    if (window.AndroidTTS && typeof AndroidTTS.stop === 'function') {
         try {
             AndroidTTS.stop();
-        } catch (e) {
-            console.warn(
-                "Impossible d'arrêter le TTS natif :",
-                e
-            );
-        }
+        } catch (e) {}
     }
 
-    /*
-     * Safety net for any <audio> element that may still exist
-     * elsewhere in the application.
-     */
+    // Sécurité : arrête aussi tout élément audio éventuellement créé
+    // par une autre partie de l'interface.
     document.querySelectorAll("audio").forEach(audio => {
         try {
             audio.pause();
@@ -6184,246 +6172,57 @@ function stopAllTts() {
         } catch (e) {}
     });
 
-    /*
-     * Remove speaking UI states.
-     */
-    document
-        .querySelectorAll(
-            ".speaking, .is-speaking, .tts-playing"
-        )
+    // Nettoyage de l'état visuel éventuel.
+    document.querySelectorAll(".speaking, .is-speaking, .tts-playing")
         .forEach(el => {
-
-            el.classList.remove(
-                "speaking",
-                "is-speaking",
-                "tts-playing"
-            );
+            el.classList.remove("speaking", "is-speaking", "tts-playing");
         });
 }
 
-
-/*
- * ============================================================
- * VOICE SELECTION
- * ============================================================
- *
- * First configuration profile:
- *
- * monsieur -> Ruslan
- * madame   -> Supertonic F1
- *
- * If no profile exists, fall back to the audio settings.
- */
 function getRussianTtsVoice() {
-
+    // Le genre choisi lors de la configuration initiale de RusseGram
+    // pilote automatiquement la voix de RussianAI.
+    //
+    // Monsieur -> Piper Ruslan
+    // Madame   -> Supertonic F1
     try {
-
-        const rawProfile =
-            localStorage.getItem(
-                "russegram_user_profile_v1"
-            );
-
+        const rawProfile = localStorage.getItem('russegram_user_profile_v1');
         if (rawProfile) {
-
-            const profile =
-                JSON.parse(rawProfile);
-
-            if (
-                profile &&
-                profile.gender === "monsieur"
-            ) {
-                return "ruslan";
-            }
-
-            if (
-                profile &&
-                profile.gender === "madame"
-            ) {
-                return "supertonic_f1";
-            }
+            const profile = JSON.parse(rawProfile);
+            if (profile && profile.gender === 'monsieur') return 'ruslan';
+            if (profile && profile.gender === 'madame') return 'supertonic_f1';
         }
-
-    } catch (e) {
-        console.warn(
-            "Impossible de lire le profil vocal :",
-            e
-        );
-    }
-
-    /*
-     * Fallback to the existing audio settings.
-     */
-    try {
-
-        if (
-            voiceSettings &&
-            voiceSettings.gender === "male"
-        ) {
-            return "ruslan";
-        }
-
     } catch (e) {}
 
-    return "supertonic_f1";
+    // Sinon, on utilise le réglage vocal de RusseGram.
+    try {
+        return voiceSettings.gender === 'male' ? 'ruslan' : 'supertonic_f1';
+    } catch (e) {
+        return 'supertonic_f1';
+    }
 }
 
-
-/*
- * ============================================================
- * SPEED
- * ============================================================
- */
 function getRussianTtsSpeed() {
-
     try {
-
-        const speed =
-            Number(
-                voiceSettings.speed || 1.0
-            );
-
-        return Math.max(
-            0.70,
-            Math.min(
-                1.40,
-                speed
-            )
-        );
-
+        const speed = Number(voiceSettings.speed || 1.0);
+        return Math.max(0.70, Math.min(1.40, speed));
     } catch (e) {
-
         return 1.0;
     }
 }
 
-
-/*
- * ============================================================
- * SPEAK
- * ============================================================
- */
 function speakRussianText(text) {
+    if (!text) return;
 
-    if (!text) {
-        return;
-    }
-
-    const cleanText =
-        String(text).trim();
-
-    if (!cleanText) {
-        return;
-    }
+    const cleanText = String(text).trim();
+    if (!cleanText) return;
 
     stopAllTts();
 
-    const statusEl =
-        document.getElementById(
-            "voice-status"
-        );
-
-    const voice =
-        getRussianTtsVoice();
-
-    const speed =
-        getRussianTtsSpeed();
-
-    if (statusEl) {
-
-        statusEl.innerText =
-            getAppLanguage() === "en"
-                ? "Generating Russian voice..."
-                : "Génération de la voix russe...";
-    }
-
-    if (
-        window.AndroidTTS &&
-        typeof AndroidTTS.speakWithParams ===
-            "function"
-    ) {
-
-        try {
-
-            AndroidTTS.speakWithParams(
-                cleanText,
-                speed,
-                voice
-            );
-
-            if (statusEl) {
-
-                statusEl.innerText =
-                    getAppLanguage() === "en"
-                        ? "Playing Russian voice..."
-                        : "Lecture de la voix russe...";
-            }
-
-        } catch (e) {
-
-            console.error(
-                "Erreur Sherpa-ONNX TTS :",
-                e
-            );
-
-            if (statusEl) {
-
-                statusEl.innerText =
-                    getAppLanguage() === "en"
-                        ? "TTS playback error"
-                        : "Erreur de lecture TTS";
-            }
-        }
-
-        return;
-    }
-
-    console.error(
-        "AndroidTTS bridge unavailable."
-    );
-
-    if (statusEl) {
-
-        statusEl.innerText =
-            getAppLanguage() === "en"
-                ? "Local TTS unavailable"
-                : "TTS local indisponible";
-    }
-}
-
-    // ------------------------------------------------------------
-    // 1. CACHE LOCAL : lecture immédiate
-    // ------------------------------------------------------------
-    const cachedDataUrl = getCachedAudio(cacheKey);
-    if (cachedDataUrl) {
-        try {
-            const audio = new Audio(cachedDataUrl);
-            currentTtsAudio = audio;
-            audio.playbackRate = speed;
-
-            audio.onended = () => {
-                if (playbackId === ttsPlaybackId && statusEl) {
-                    statusEl.innerText = getAppLanguage() === 'en'
-                        ? 'Hold the button to speak'
-                        : 'Maintiens le bouton enfoncé pour parler';
-                }
-                if (currentTtsAudio === audio) currentTtsAudio = null;
-            };
-
-            if (playbackId !== ttsPlaybackId) return;
-
-            if (statusEl) {
-                statusEl.innerText = getAppLanguage() === 'en'
-                    ? 'Playing cached TTS...'
-                    : 'Lecture TTS en cache...';
-            }
-
-            await audio.play();
-            return;
-        } catch (e) {
-            console.warn('Cache Silero invalide, nouvelle génération :', e);
-            try { localStorage.removeItem(cacheKey); } catch (_) {}
-        }
-    }
+    const playbackId = ttsPlaybackId;
+    const statusEl = document.getElementById('voice-status');
+    const voice = getRussianTtsVoice();
+    const speed = getRussianTtsSpeed();
 
     if (statusEl) {
         statusEl.innerText = getAppLanguage() === 'en'
@@ -6431,7 +6230,35 @@ function speakRussianText(text) {
             : 'Génération de la voix russe...';
     }
 
+    if (window.AndroidTTS && typeof AndroidTTS.speakWithParams === 'function') {
+        try {
+            AndroidTTS.speakWithParams(cleanText, speed, voice);
 
+            // Le moteur natif effectue la génération puis la lecture.
+            // On ne crée aucun Audio() côté JavaScript.
+            if (playbackId === ttsPlaybackId && statusEl) {
+                statusEl.innerText = getAppLanguage() === 'en'
+                    ? 'Playing Russian voice...'
+                    : 'Lecture de la voix russe...';
+            }
+        } catch (e) {
+            console.error('Erreur Sherpa-ONNX TTS :', e);
+            if (playbackId === ttsPlaybackId && statusEl) {
+                statusEl.innerText = getAppLanguage() === 'en'
+                    ? 'TTS playback error'
+                    : 'Erreur de lecture TTS';
+            }
+        }
+        return;
+    }
+
+    console.error('AndroidTTS bridge unavailable.');
+    if (statusEl) {
+        statusEl.innerText = getAppLanguage() === 'en'
+            ? 'Local TTS unavailable'
+            : 'TTS local indisponible';
+    }
+}
 
     const SECONDARY_TABS = ['ai', 'russian-ai-voice', 'dictee', 'correction', 'traduction', 'aspect', 'reading', 'settings'];
 
