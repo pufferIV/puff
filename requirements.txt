@@ -1,5 +1,4 @@
---extra-index-url https://download.pytorch.org/whl/cpu
-fastapi==0.141.1
-uvicorn[standard]==0.53.0
-numpy>=2.1,<3
-torch==2.10.0+cpu
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+edge-tts==6.1.19
+pydantic==2.10.3
