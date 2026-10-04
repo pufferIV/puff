@@ -27,41 +27,11 @@ IN_FLIGHT_LOCK = asyncio.Lock()
 
 
 async def generate_audio_stream(text: str, voice: str, rate: str):
-    """Génère le MP3 et le transmet au client au fil de l'eau."""
-    last_error = None
-
-    for attempt in range(2):
-        audio_data = bytearray()
-        got_audio = False
-
-        try:
-            communicate = edge_tts.Communicate(text, voice, rate=rate)
-
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio" and chunk["data"]:
-                    data = chunk["data"]
-                    got_audio = True
-                    audio_data.extend(data)
-                    yield data
-
-            if got_audio and audio_data:
-                return
-
-            raise RuntimeError("Edge TTS returned no audio")
-
-        except Exception as exc:
-            last_error = exc
-            if got_audio:
-                # Le flux a déjà commencé : on ne peut pas recommencer au milieu
-                # du MP3. Le client recevra une erreur plutôt qu'un faux fichier.
-                print(f"Edge TTS stream interrupted: {type(exc).__name__}: {exc}")
-                return
-
-            if attempt == 0:
-                await asyncio.sleep(0.15)
-
-    print(f"Edge TTS generation failed: {type(last_error).__name__}: {last_error}")
-    raise last_error or RuntimeError("Edge TTS failed")
+    """Génère le MP3 et transmet chaque chunk immédiatement."""
+    communicate = edge_tts.Communicate(text, voice, rate=rate)
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio" and chunk["data"]:
+            yield chunk["data"]
 
 
 async def get_cached_audio(text: str, voice: str, rate: str):
@@ -111,51 +81,27 @@ async def generate_and_cache(text: str, voice: str, rate: str):
 
 
 async def stream_tts(text: str, voice: str, rate: str):
-    """Retourne le cache immédiatement, sinon génère progressivement."""
+    """Sert le cache immédiatement, sinon transmet Edge TTS directement."""
     cached = await get_cached_audio(text, voice, rate)
     if cached is not None:
-        # Découpage léger pour permettre à HTTP de transmettre immédiatement
-        # les premiers octets, même pour une réponse issue du cache.
         chunk_size = 32 * 1024
         for pos in range(0, len(cached), chunk_size):
             yield cached[pos:pos + chunk_size]
         return
 
-    # Génération réellement progressive.
-    # On accumule aussi une copie afin de pouvoir mettre le résultat en cache
-    # uniquement si tout le flux s'est terminé correctement.
+    # Aucun contrôle préalable, aucun retry et aucun délai :
+    # chaque chunk reçu d'Edge TTS est envoyé immédiatement au client.
     audio_data = bytearray()
-    last_error = None
+    communicate = edge_tts.Communicate(text, voice, rate=rate)
 
-    for attempt in range(2):
-        try:
-            communicate = edge_tts.Communicate(text, voice, rate=rate)
-            audio_data.clear()
-            got_audio = False
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio" and chunk["data"]:
+            data = chunk["data"]
+            audio_data.extend(data)
+            yield data
 
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio" and chunk["data"]:
-                    data = chunk["data"]
-                    got_audio = True
-                    audio_data.extend(data)
-                    yield data
-
-            if not got_audio or not audio_data:
-                raise RuntimeError("Edge TTS returned no audio")
-
-            await store_cached_audio(text, voice, rate, bytes(audio_data))
-            return
-
-        except Exception as exc:
-            last_error = exc
-            if got_audio:
-                print(f"Edge TTS stream interrupted: {type(exc).__name__}: {exc}")
-                return
-            if attempt == 0:
-                await asyncio.sleep(0.15)
-
-    print(f"Edge TTS generation failed: {type(last_error).__name__}: {last_error}")
-    raise last_error or RuntimeError("Edge TTS failed")
+    if audio_data:
+        await store_cached_audio(text, voice, rate, bytes(audio_data))
 
 
 @app.get("/")
