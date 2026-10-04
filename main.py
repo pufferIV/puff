@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from collections import OrderedDict
 
 import edge_tts
@@ -112,13 +113,18 @@ async def _produce(key, job: Job):
     """Tâche indépendante de la connexion du client : si l'app coupe la lecture,
     la génération se termine quand même et remplit le cache."""
     text, voice, rate = key
+    t0 = time.perf_counter()
+    first_byte_ms = None
     try:
         async with _sem():
+            waited_ms = int((time.perf_counter() - t0) * 1000)
             for attempt in range(2):
                 try:
                     communicate = edge_tts.Communicate(text, voice, rate=rate)
                     async for chunk in communicate.stream():
                         if chunk["type"] == "audio" and chunk["data"]:
+                            if first_byte_ms is None:
+                                first_byte_ms = int((time.perf_counter() - t0) * 1000)
                             await job.push(chunk["data"])
                     if job.chunks:
                         break
@@ -128,9 +134,14 @@ async def _produce(key, job: Job):
                     if job.chunks or attempt == 1:
                         raise
                     await asyncio.sleep(0.1)
-        cache_put(key, b"".join(job.chunks))
+        audio = b"".join(job.chunks)
+        cache_put(key, audio)
         await job.finish()
+        total_ms = int((time.perf_counter() - t0) * 1000)
+        # Visible dans les logs Render : permet de voir où part le temps.
+        print(f"[tts] {len(text)} car. | file d'attente {waited_ms} ms | 1er octet {first_byte_ms} ms | total {total_ms} ms | {len(audio) // 1024} Ko", flush=True)
     except Exception as exc:  # noqa: BLE001
+        print(f"[tts] ERREUR après {int((time.perf_counter() - t0) * 1000)} ms : {exc!r}", flush=True)
         await job.finish(exc)
     finally:
         IN_FLIGHT.pop(key, None)
